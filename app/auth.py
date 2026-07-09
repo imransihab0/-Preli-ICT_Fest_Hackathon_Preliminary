@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import Depends, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import (
@@ -17,11 +18,12 @@ from .config import (
 )
 from .database import get_db
 from .errors import AppError
-from .models import User
+from .models import RevokedToken, User
 
-# Access tokens presented to /auth/logout are recorded here so they can no
-# longer be used.
-_revoked_tokens: set[str] = set()
+# Access tokens presented to /auth/logout and refresh tokens presented to
+# /auth/refresh are recorded in the revoked_tokens table (by jti) so they can
+# no longer be used — including after a process restart, since the database
+# outlives the process.
 
 _PBKDF2_ROUNDS = 100_000
 
@@ -47,7 +49,7 @@ def _now_ts() -> int:
 
 def create_access_token(user: User) -> str:
     iat = _now_ts()
-    lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user.id),
         "org": user.org_id,
@@ -82,11 +84,30 @@ def decode_token(token: str) -> dict:
         raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
 
 
-def revoke_access_token(payload: dict) -> None:
-    _revoked_tokens.add(payload["jti"])
+def revoke_access_token(payload: dict, db: Session) -> None:
+    consume_token(payload, db)
 
 
-def get_token_payload(request: Request) -> dict:
+def consume_token(payload: dict, db: Session) -> bool:
+    """Atomically revoke a token's jti; False if it was already revoked.
+
+    The primary-key constraint makes concurrent consumption of the same
+    token yield exactly one success.
+    """
+    db.add(RevokedToken(jti=payload["jti"]))
+    try:
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        return False
+
+
+def _is_revoked(jti: str | None, db: Session) -> bool:
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def get_token_payload(request: Request, db: Session = Depends(get_db)) -> dict:
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         raise AppError(401, "UNAUTHORIZED", "Missing bearer token")
@@ -94,7 +115,7 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if payload.get("sub") in _revoked_tokens:
+    if _is_revoked(payload.get("jti"), db):
         raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload
 

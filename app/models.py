@@ -59,6 +59,13 @@ class Booking(Base):
     refunds = relationship("RefundLog", backref="booking")
 
 
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    jti = Column(String, primary_key=True)
+    revoked_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RefundLog(Base):
     __tablename__ = "refund_logs"
 
