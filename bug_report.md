@@ -290,6 +290,18 @@ database. Reproduced by restarting the server against the same DB file.)
   ValueError)` → `401 UNAUTHORIZED` in both `get_current_user` and the refresh
   handler.
 
+### 28. Usage report served a stale cache after a room was created
+- **File:** `app/routers/rooms.py` (`create_room`) — cache in `app/cache.py`
+- **Bug:** The usage report is cached per `(org_id, from, to)` and invalidated
+  on booking create/cancel, but **not** on room creation. Rule 12 requires the
+  report to include *every* room in the org (including zero-booking ones) and
+  to "reflect the current state immediately." Reproduced live: request a
+  report (caches it), create a new room, request the same report again — the
+  new room was missing because the stale cache was returned.
+- **Fix:** `create_room` now calls `cache.invalidate_report(admin.org_id)`
+  after committing the new room, so the next report recomputes and includes it.
+  Verified: report goes from 1 room to 2 immediately after room creation.
+
 ---
 
 ## Adversarial pass — verified safe (no change needed)

@@ -54,6 +54,9 @@ def create_room(
     db.add(room)
     db.commit()
     db.refresh(room)
+    # The usage report lists every room in the org (including zero-booking
+    # ones), so a cached report is stale once a new room exists.
+    cache.invalidate_report(admin.org_id)
     return _serialize_room(room)
 
 
