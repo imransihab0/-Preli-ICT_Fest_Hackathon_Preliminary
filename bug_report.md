@@ -276,3 +276,42 @@ database. Reproduced by restarting the server against the same DB file.)
   as non-existent → `404` on every code path.
 - **Fix:** When `room_id` is supplied, the export endpoint verifies the room
   belongs to the caller's org and raises `404 ROOM_NOT_FOUND` otherwise.
+
+### 27. Non-integer JWT `sub` claim crashed authenticated requests with a 500
+- **Files:** `app/auth.py` (`get_current_user`), `app/routers/auth.py` (`refresh`)
+- **Bug:** Both paths did `int(payload["sub"])` with no guard. A validly
+  signed token whose `sub` is non-numeric (or missing) raised
+  `ValueError`/`KeyError`, producing `500 Internal Server Error` instead of a
+  clean `401`. Surfaced by a security fuzz pass signing a token with
+  `sub="notanumber"`. Not exploitable without the signing secret, but it is a
+  latent 500 and violates rule 16 (the service must respond correctly to all
+  requests) and the "invalid token → 401" contract.
+- **Fix:** Wrapped the conversion in `try/except (KeyError, TypeError,
+  ValueError)` → `401 UNAUTHORIZED` in both `get_current_user` and the refresh
+  handler.
+
+---
+
+## Adversarial pass — verified safe (no change needed)
+
+A full security sweep (`sec_probe.py`) confirmed the following are already
+handled correctly, so no code was changed for them:
+
+- **JWT:** `alg=none`, tampered/garbage tokens, wrong-secret forgeries,
+  expired tokens, and refresh-token-as-access are all rejected with 401
+  (`jwt.decode` pins `algorithms=[HS256]`).
+- **Authorization source:** role and org are always read from the database
+  (`get_current_user` → DB), never trusted from JWT claims, so a stale token
+  cannot escalate privilege or cross tenants.
+- **IDOR / multi-tenancy:** cross-org read/cancel/availability/stats/booking
+  and member-reads-another-member all return 404; admin-only endpoints return
+  403 for members — verified on every endpoint.
+- **Input fuzzing:** a battery of malformed datetimes (empty, unicode digits,
+  out-of-range components, bad offsets, over-long fractional seconds),
+  negative and huge room ids, and pagination extremes never produce a 500.
+- **CSV export:** only system-controlled fields are emitted (id, reference
+  code, ids, timestamps, status, price) — no user free-text, so no CSV
+  formula-injection vector.
+- **State consistency:** cancelled bookings are excluded from availability,
+  stats, and the usage report; date-boundary filtering for availability is
+  correct; half-up refund rounding holds on odd prices (50% of 1001 = 501).
